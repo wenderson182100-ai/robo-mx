@@ -1,7 +1,17 @@
 const express = require('express');
 const https = require('https');
 const app = express();
-app.use(express.json());
+app.use(express.text({ type: '*/*', limit: '1mb' }));
+
+// Leona pode mandar corpo sem aspas: {telefone: 5511..., mensagem: texto livre}
+function parseCorpo(raw) {
+  if (raw && typeof raw === 'object') return raw;
+  const txt = String(raw || '').trim();
+  try { return JSON.parse(txt); } catch (e) {}
+  const m = txt.match(/^\{?\s*"?telefone"?\s*:\s*"?([^,"]*)"?\s*,\s*"?mensagem"?\s*:\s*([\s\S]*?)\s*\}?\s*$/);
+  if (m) return { telefone: m[1].trim(), mensagem: m[2].replace(/^"|"$/g, '').trim() };
+  return {};
+}
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const LOCUCAO_SITE = process.env.LOCUCAO_SITE || 'https://locucion-ya-mx-production.up.railway.app';
@@ -140,23 +150,29 @@ app.post('/chat', async (req, res) => {
   if (LEONA_SECRET && req.headers['x-leona-secret'] !== LEONA_SECRET) {
     return res.status(401).json({ erro: 'Unauthorized' });
   }
-  const { telefone, mensagem } = req.body;
+  const { telefone, mensagem } = parseCorpo(req.body);
+  console.log('[chat] recebido:', JSON.stringify(req.body).slice(0, 300));
   if (!telefone || !mensagem) return res.status(400).json({ erro: 'telefone e mensagem são obrigatórios' });
 
   const key = String(telefone).replace(/\D/g, '');
-  if (!conversas.has(key)) conversas.set(key, { msgs: [], inicio: Date.now(), done: false });
+  // conversa nova se não existe, se já terminou ou se ficou parada mais de 6h
+  const old = conversas.get(key);
+  if (!old || old.done || Date.now() - (old.ultima || old.inicio) > 6 * 3600e3) {
+    conversas.set(key, { msgs: [], inicio: Date.now(), done: false });
+  }
   const c = conversas.get(key);
-  if (c.done) return res.json({ resposta: '', fim: true });
+  c.ultima = Date.now();
 
   c.msgs.push({ role: 'user', content: mensagem });
   let resposta = '';
   try { resposta = await claudeHaiku(c.msgs); }
-  catch (e) { return res.status(500).json({ erro: e.message }); }
+  catch (e) { console.error('Erro Claude:', e.message); c.msgs.pop(); return res.json({ resposta: 'Perdón, tuve un problemita técnico 🙏 ¿Me lo repites por favor?', fim: "nao", desistiu: "false", audio_url: '', pagamento: '' }); }
   c.msgs.push({ role: 'assistant', content: resposta });
 
   const fimDesistiu = /\[\[FIM:desistiu\]\]/i.test(resposta);
   const fim = fimDesistiu || /\[\[FIM\]\]/i.test(resposta);
-  const respostaLimpa = resposta.replace(/\[\[FIM(:desistiu)?\]\]/gi, '').trim();
+  let respostaLimpa = resposta.replace(/\[\[FIM(:desistiu)?\]\]/gi, '').trim();
+  if (!respostaLimpa && !fimDesistiu) respostaLimpa = '¡Va! ✔';
 
   let audioUrl = '';
   let pagamento = '';
@@ -177,7 +193,7 @@ app.post('/chat', async (req, res) => {
     c.done = true;
   }
 
-  res.json({ resposta: respostaLimpa, fim, desistiu: fimDesistiu, audio_url: audioUrl, pagamento });
+  res.json({ resposta: respostaLimpa, fim: (fim && !fimDesistiu) ? "sim" : "nao", desistiu: fimDesistiu ? "true" : "false", audio_url: audioUrl, pagamento });
 });
 
 app.delete('/chat/:telefone', (req, res) => {
