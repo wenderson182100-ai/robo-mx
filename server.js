@@ -154,7 +154,7 @@ app.post('/chat', async (req, res) => {
   console.log('[chat] recebido:', JSON.stringify(req.body).slice(0, 300));
   if (!telefone || !mensagem) return res.status(400).json({ erro: 'telefone e mensagem são obrigatórios' });
 
-  const key = String(telefone).replace(/\D/g, '');
+  const key = String(telefone).replace(/\D/g, '').slice(-10);
   // conversa nova se não existe, se já terminou ou se ficou parada mais de 6h
   const old = conversas.get(key);
   if (!old || old.done || Date.now() - (old.ultima || old.inicio) > 6 * 3600e3) {
@@ -170,8 +170,17 @@ app.post('/chat', async (req, res) => {
   c.msgs.push({ role: 'assistant', content: resposta });
 
   const fimDesistiu = /\[\[FIM:desistiu\]\]/i.test(resposta);
-  const fim = fimDesistiu || /\[\[FIM\]\]/i.test(resposta);
-  let respostaLimpa = resposta.replace(/\[\[FIM(:desistiu)?\]\]/gi, '').trim();
+  let fim = fimDesistiu || /\[\[FIM\]\]/i.test(resposta);
+  if (fim && !fimDesistiu && !extrairGuion(c.msgs)) {
+    // aprovou antes de ver o texto: pede para a IA escrever o anúncio agora
+    c.msgs.pop(); c.msgs.pop();
+    c.msgs.push({ role: 'user', content: mensagem + '\n\n[NOTA INTERNA: todavía no has enviado el texto del anuncio. Escríbelo ahora completo con lo que ya sabes y pregunta "¿Le cambio algo?". NO uses [[FIM]].]' });
+    try { resposta = await claudeHaiku(c.msgs); } catch (e) { resposta = ''; }
+    c.msgs.pop(); c.msgs.push({ role: 'user', content: mensagem });
+    c.msgs.push({ role: 'assistant', content: resposta });
+    fim = false;
+  }
+  let respostaLimpa = resposta.replace(/\[\[FIM(:desistiu)?\]\]/gi, '').replace(/\n*\s*---\s*\n*/g, '\n\n').trim();
   if (!respostaLimpa && !fimDesistiu) respostaLimpa = '¡Va! ✔';
 
   let audioUrl = '';
